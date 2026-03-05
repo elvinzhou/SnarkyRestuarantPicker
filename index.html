@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Where Should You Eat?</title>
+  <style>
+    :root {
+      --bg: #f4ecd8;
+      --fg: #1e1b16;
+      --muted: #5b5247;
+      --line: #1e1b16;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: "Courier New", Courier, monospace;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(760px, 100%);
+      border: 2px solid var(--line);
+      padding: 20px;
+      background: #fff8e8;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(1.5rem, 3vw, 2rem);
+    }
+
+    p {
+      margin: 0 0 12px;
+      color: var(--muted);
+    }
+
+    #result {
+      margin: 20px 0 8px;
+      font-size: 1.1rem;
+      color: var(--fg);
+      min-height: 4.5rem;
+      white-space: pre-line;
+    }
+
+    #providerStatus {
+      margin: 0 0 12px;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    a {
+      color: var(--fg);
+      text-decoration-thickness: 2px;
+      font-weight: 700;
+    }
+
+    button {
+      appearance: none;
+      border: 2px solid var(--line);
+      background: transparent;
+      color: var(--fg);
+      font: inherit;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+
+    button:hover,
+    button:focus-visible {
+      background: var(--fg);
+      color: var(--bg);
+      outline: none;
+    }
+
+    .small {
+      margin-top: 14px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Fine. Here’s Your Restaurant.</h1>
+    <p>
+      I’ll use your location, find nearby places to eat, and pick one at random because decision fatigue is undefeated.
+    </p>
+
+    <button id="spin" type="button">Pick a Restaurant</button>
+
+    <div id="result" role="status" aria-live="polite">
+      Press the button and let fate ruin your evening plans.
+    </div>
+
+    <div id="providerStatus" aria-live="polite">Provider: idle</div>
+
+    <p class="small">
+      Clicking a restaurant opens a map link. If location is blocked, your browser is the problem, not me.
+    </p>
+  </main>
+
+  <script>
+    const spinBtn = document.getElementById("spin");
+    const result = document.getElementById("result");
+    const providerStatus = document.getElementById("providerStatus");
+
+    let cache = [];
+
+    // Optional: add your Amap (Gaode) Web Service key for much better reliability in mainland China.
+    // Get one at: https://lbs.amap.com/
+    const AMAP_WEB_KEY = "";
+
+    const overpassEndpoints = [
+      "https://overpass-api.de/api/interpreter",
+      "https://overpass.kumi.systems/api/interpreter",
+      "https://overpass.private.coffee/api/interpreter"
+    ];
+
+    function setStatus(message) {
+      result.textContent = message;
+    }
+
+    function setProviderStatus(message) {
+      providerStatus.textContent = `Provider: ${message}`;
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function pickRandomRestaurant(restaurants) {
+      return restaurants[Math.floor(Math.random() * restaurants.length)];
+    }
+
+    function isLikelyInChina() {
+      const locale = String(navigator.language || "").toLowerCase();
+      const tz = String(Intl.DateTimeFormat().resolvedOptions().timeZone || "");
+      return locale.includes("zh-cn") || tz === "Asia/Shanghai" || tz === "Asia/Chongqing";
+    }
+
+    function mapLinksForPlace(place) {
+      const name = place.name || "Unnamed place with food-ish vibes";
+      const lat = place.lat;
+      const lon = place.lon;
+
+      const google = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${name} ${lat},${lon}`)}`;
+      const osm = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=18/${lat}/${lon}`;
+      const amap = `https://uri.amap.com/marker?position=${lon},${lat}&name=${encodeURIComponent(name)}`;
+      const baidu = `https://api.map.baidu.com/marker?location=${lat},${lon}&title=${encodeURIComponent(name)}&content=${encodeURIComponent(name)}&output=html&coord_type=wgs84`;
+
+      if (isLikelyInChina()) {
+        return { primary: amap, secondary: baidu, secondaryLabel: "Baidu backup" };
+      }
+
+      return { primary: google, secondary: osm, secondaryLabel: "OpenStreetMap backup" };
+    }
+
+    function renderRestaurant(place) {
+      const name = place.name || "Unnamed place with food-ish vibes";
+      const lat = place.lat;
+      const lon = place.lon;
+
+      if (typeof lat !== "number" || typeof lon !== "number") {
+        setStatus("Found a place, but not where it is. Impressive.");
+        return;
+      }
+
+      const links = mapLinksForPlace(place);
+      result.innerHTML = `Your winner is: <a href="${links.primary}" target="_blank" rel="noopener noreferrer">${escapeHtml(name)}</a>.\nIf that map throws a tantrum, try <a href="${links.secondary}" target="_blank" rel="noopener noreferrer">${links.secondaryLabel}</a>.`;
+    }
+
+    function buildOverpassQuery(lat, lon, radius) {
+      return `
+[out:json][timeout:25];
+(
+  node["amenity"="restaurant"](around:${radius},${lat},${lon});
+  way["amenity"="restaurant"](around:${radius},${lat},${lon});
+  relation["amenity"="restaurant"](around:${radius},${lat},${lon});
+);
+out center 80;
+`;
+    }
+
+    async function fetchFromOverpassEndpoint(url, query) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        body: query.trim()
+      });
+
+      if (!response.ok) {
+        throw new Error(`Overpass request failed (${response.status}) from ${url}`);
+      }
+
+      const data = await response.json();
+      const elements = Array.isArray(data.elements) ? data.elements : [];
+
+      return elements
+        .map((item) => {
+          const name = item.tags?.name;
+          const lat = item.lat ?? item.center?.lat;
+          const lon = item.lon ?? item.center?.lon;
+
+          if (!name || typeof lat !== "number" || typeof lon !== "number") {
+            return null;
+          }
+
+          return { name, lat, lon };
+        })
+        .filter(Boolean);
+    }
+
+    async function fetchFromOverpass(lat, lon) {
+      const radii = [1600, 3200, 6000];
+
+      for (const radius of radii) {
+        const query = buildOverpassQuery(lat, lon, radius);
+        let hadError = false;
+
+        for (const endpoint of overpassEndpoints) {
+          try {
+            const places = await fetchFromOverpassEndpoint(endpoint, query);
+            if (places.length > 0) {
+              setProviderStatus(`OpenStreetMap Overpass (${new URL(endpoint).host})`);
+              return places;
+            }
+          } catch (error) {
+            hadError = true;
+            console.warn(`Overpass endpoint failed: ${endpoint}`, error);
+          }
+        }
+
+        if (hadError) {
+          console.warn(`All Overpass endpoints failed for radius ${radius}m`);
+        }
+      }
+
+      return [];
+    }
+
+    async function fetchFromAmap(lat, lon) {
+      if (!AMAP_WEB_KEY) {
+        return [];
+      }
+
+      const radii = [1500, 3000, 5000];
+
+      for (const radius of radii) {
+        const url = new URL("https://restapi.amap.com/v3/place/around");
+        url.searchParams.set("key", AMAP_WEB_KEY);
+        url.searchParams.set("location", `${lon},${lat}`);
+        url.searchParams.set("keywords", "餐厅");
+        url.searchParams.set("types", "050000");
+        url.searchParams.set("radius", String(radius));
+        url.searchParams.set("offset", "25");
+        url.searchParams.set("page", "1");
+        url.searchParams.set("extensions", "base");
+        url.searchParams.set("sortrule", "distance");
+        url.searchParams.set("output", "JSON");
+
+        const response = await fetch(url.toString());
+        if (!response.ok) {
+          throw new Error(`Amap request failed (${response.status})`);
+        }
+
+        const data = await response.json();
+        const pois = Array.isArray(data.pois) ? data.pois : [];
+
+        const places = pois
+          .map((poi) => {
+            if (!poi?.name || typeof poi.location !== "string") {
+              return null;
+            }
+
+            const [poiLon, poiLat] = poi.location.split(",").map(Number);
+            if (!Number.isFinite(poiLon) || !Number.isFinite(poiLat)) {
+              return null;
+            }
+
+            return { name: poi.name, lat: poiLat, lon: poiLon };
+          })
+          .filter(Boolean);
+
+        if (places.length > 0) {
+          setProviderStatus("Amap (Gaode)");
+          return places;
+        }
+      }
+
+      return [];
+    }
+
+    async function fetchNearbyRestaurants(lat, lon) {
+      const inChina = isLikelyInChina();
+
+      if (inChina) {
+        try {
+          const chinaPlaces = await fetchFromAmap(lat, lon);
+          if (chinaPlaces.length > 0) {
+            return chinaPlaces;
+          }
+        } catch (error) {
+          console.warn("Amap failed, falling back to Overpass", error);
+        }
+      }
+
+      return fetchFromOverpass(lat, lon);
+    }
+
+    function getCurrentPosition() {
+      return new Promise((resolve, reject) => {
+        if (!navigator.geolocation) {
+          reject(new Error("Geolocation not supported"));
+          return;
+        }
+
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 120000
+        });
+      });
+    }
+
+    async function chooseRestaurant() {
+      spinBtn.disabled = true;
+      setStatus("Finding your location and judging your options...");
+      setProviderStatus("checking...");
+
+      try {
+        if (cache.length === 0) {
+          const position = await getCurrentPosition();
+          const { latitude, longitude } = position.coords;
+
+          if (isLikelyInChina() && !AMAP_WEB_KEY) {
+            console.warn("China mode without AMAP_WEB_KEY; falling back to Overpass only.");
+          }
+
+          cache = await fetchNearbyRestaurants(latitude, longitude);
+        }
+
+        if (cache.length === 0) {
+          setStatus("No restaurants found nearby after checking multiple map providers. Either you’re remote or cursed.");
+          setProviderStatus("none");
+          return;
+        }
+
+        renderRestaurant(pickRandomRestaurant(cache));
+      } catch (error) {
+        console.error(error);
+        setStatus("Couldn’t fetch restaurants right now. The map servers are being dramatic; try again in a minute.");
+        setProviderStatus("error");
+      } finally {
+        spinBtn.disabled = false;
+      }
+    }
+
+    spinBtn.addEventListener("click", chooseRestaurant);
+  </script>
+</body>
+</html>
