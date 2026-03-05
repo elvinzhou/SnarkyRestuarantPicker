@@ -114,10 +114,6 @@
 
     let cache = [];
 
-    // Optional: add your Amap (Gaode) Web Service key for much better reliability in mainland China.
-    // Get one at: https://lbs.amap.com/
-    const AMAP_WEB_KEY = "";
-
     const overpassEndpoints = [
       "https://overpass-api.de/api/interpreter",
       "https://overpass.kumi.systems/api/interpreter",
@@ -251,29 +247,19 @@ out center 80;
       return [];
     }
 
-    async function fetchFromAmap(lat, lon) {
-      if (!AMAP_WEB_KEY) {
-        return [];
-      }
-
+    async function fetchFromAmapProxy(lat, lon) {
       const radii = [1500, 3000, 5000];
 
       for (const radius of radii) {
-        const url = new URL("https://restapi.amap.com/v3/place/around");
-        url.searchParams.set("key", AMAP_WEB_KEY);
-        url.searchParams.set("location", `${lon},${lat}`);
-        url.searchParams.set("keywords", "餐厅");
-        url.searchParams.set("types", "050000");
+        const url = new URL("/api/restaurants", window.location.origin);
+        url.searchParams.set("lat", String(lat));
+        url.searchParams.set("lon", String(lon));
         url.searchParams.set("radius", String(radius));
-        url.searchParams.set("offset", "25");
-        url.searchParams.set("page", "1");
-        url.searchParams.set("extensions", "base");
-        url.searchParams.set("sortrule", "distance");
-        url.searchParams.set("output", "JSON");
 
         const response = await fetch(url.toString());
         if (!response.ok) {
-          throw new Error(`Amap request failed (${response.status})`);
+          const bodyText = await response.text();
+          throw new Error(`Amap proxy failed (${response.status}): ${bodyText.slice(0, 120)}`);
         }
 
         const data = await response.json();
@@ -295,7 +281,7 @@ out center 80;
           .filter(Boolean);
 
         if (places.length > 0) {
-          setProviderStatus("Amap (Gaode)");
+          setProviderStatus("Amap (Gaode via proxy)");
           return places;
         }
       }
@@ -304,16 +290,14 @@ out center 80;
     }
 
     async function fetchNearbyRestaurants(lat, lon) {
-      const inChina = isLikelyInChina();
-
-      if (inChina) {
+      if (isLikelyInChina()) {
         try {
-          const chinaPlaces = await fetchFromAmap(lat, lon);
+          const chinaPlaces = await fetchFromAmapProxy(lat, lon);
           if (chinaPlaces.length > 0) {
             return chinaPlaces;
           }
         } catch (error) {
-          console.warn("Amap failed, falling back to Overpass", error);
+          console.warn("Amap proxy failed, falling back to Overpass", error);
         }
       }
 
@@ -344,11 +328,6 @@ out center 80;
         if (cache.length === 0) {
           const position = await getCurrentPosition();
           const { latitude, longitude } = position.coords;
-
-          if (isLikelyInChina() && !AMAP_WEB_KEY) {
-            console.warn("China mode without AMAP_WEB_KEY; falling back to Overpass only.");
-          }
-
           cache = await fetchNearbyRestaurants(latitude, longitude);
         }
 
