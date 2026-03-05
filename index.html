@@ -112,7 +112,9 @@
     const result = document.getElementById("result");
     const providerStatus = document.getElementById("providerStatus");
 
-    let cache = [];
+    const placeByKey = new Map();
+    const unseenKeys = new Set();
+    let userCoords = null;
 
     const overpassEndpoints = [
       "https://overpass-api.de/api/interpreter",
@@ -137,8 +139,56 @@
         .replace(/'/g, "&#039;");
     }
 
-    function pickRandomRestaurant(restaurants) {
-      return restaurants[Math.floor(Math.random() * restaurants.length)];
+    function makePlaceKey(place) {
+      const normalizedName = String(place.name || "").trim().toLowerCase();
+      const lat = Number(place.lat).toFixed(5);
+      const lon = Number(place.lon).toFixed(5);
+      return `${normalizedName}|${lat}|${lon}`;
+    }
+
+    function addPlacesToPool(places) {
+      let addedCount = 0;
+
+      for (const place of places) {
+        if (!place || typeof place.name !== "string") {
+          continue;
+        }
+        if (!Number.isFinite(place.lat) || !Number.isFinite(place.lon)) {
+          continue;
+        }
+
+        const key = makePlaceKey(place);
+        if (placeByKey.has(key)) {
+          continue;
+        }
+
+        placeByKey.set(key, place);
+        unseenKeys.add(key);
+        addedCount += 1;
+      }
+
+      return addedCount;
+    }
+
+    function pickRandomRestaurant() {
+      if (unseenKeys.size === 0) {
+        return null;
+      }
+
+      const availableKeys = Array.from(unseenKeys);
+      const selectedKey = availableKeys[Math.floor(Math.random() * availableKeys.length)];
+      unseenKeys.delete(selectedKey);
+      return placeByKey.get(selectedKey) || null;
+    }
+
+    function shouldExpandSearch() {
+      const total = placeByKey.size;
+      if (total === 0) {
+        return true;
+      }
+
+      const remainingRatio = unseenKeys.size / total;
+      return remainingRatio <= 0.3;
     }
 
     function isLikelyInChina() {
@@ -219,8 +269,8 @@ out center 80;
         .filter(Boolean);
     }
 
-    async function fetchFromOverpass(lat, lon) {
-      const radii = [1600, 3200, 6000];
+    async function fetchFromOverpass(lat, lon, expandSearch = false) {
+      const radii = expandSearch ? [8000, 12000, 18000] : [1600, 3200, 6000];
 
       for (const radius of radii) {
         const query = buildOverpassQuery(lat, lon, radius);
@@ -247,8 +297,8 @@ out center 80;
       return [];
     }
 
-    async function fetchFromAmapProxy(lat, lon) {
-      const radii = [1500, 3000, 5000];
+    async function fetchFromAmapProxy(lat, lon, expandSearch = false) {
+      const radii = expandSearch ? [5000, 8000, 12000] : [1500, 3000, 5000];
 
       for (const radius of radii) {
         const url = new URL("/api/restaurants", window.location.origin);
@@ -289,10 +339,10 @@ out center 80;
       return [];
     }
 
-    async function fetchNearbyRestaurants(lat, lon) {
+    async function fetchNearbyRestaurants(lat, lon, expandSearch = false) {
       if (isLikelyInChina()) {
         try {
-          const chinaPlaces = await fetchFromAmapProxy(lat, lon);
+          const chinaPlaces = await fetchFromAmapProxy(lat, lon, expandSearch);
           if (chinaPlaces.length > 0) {
             return chinaPlaces;
           }
@@ -301,7 +351,7 @@ out center 80;
         }
       }
 
-      return fetchFromOverpass(lat, lon);
+      return fetchFromOverpass(lat, lon, expandSearch);
     }
 
     function getCurrentPosition() {
@@ -321,23 +371,45 @@ out center 80;
 
     async function chooseRestaurant() {
       spinBtn.disabled = true;
-      setStatus("Finding your location and judging your options...");
-      setProviderStatus("checking...");
+      const needsInitialFetch = placeByKey.size === 0;
+      const needsExpandedFetch = !needsInitialFetch && shouldExpandSearch();
+
+      if (needsInitialFetch) {
+        setStatus("Finding your location and judging your options...");
+        setProviderStatus("checking...");
+      } else if (needsExpandedFetch) {
+        setStatus("You burned through most options. Expanding search radius...");
+        setProviderStatus("checking...");
+      } else {
+        setStatus("Re-rolling from the same list, because commitment is hard.");
+      }
 
       try {
-        if (cache.length === 0) {
+        if (needsInitialFetch) {
           const position = await getCurrentPosition();
           const { latitude, longitude } = position.coords;
-          cache = await fetchNearbyRestaurants(latitude, longitude);
+          userCoords = { lat: latitude, lon: longitude };
+          const fetched = await fetchNearbyRestaurants(userCoords.lat, userCoords.lon, false);
+          addPlacesToPool(fetched);
+        } else if (needsExpandedFetch && userCoords) {
+          const fetched = await fetchNearbyRestaurants(userCoords.lat, userCoords.lon, true);
+          addPlacesToPool(fetched);
         }
 
-        if (cache.length === 0) {
-          setStatus("No restaurants found nearby after checking multiple map providers. Either you’re remote or cursed.");
+        if (unseenKeys.size === 0) {
+          setStatus("No fresh restaurants left after expansion. Either you’re remote or cursed.");
           setProviderStatus("none");
           return;
         }
 
-        renderRestaurant(pickRandomRestaurant(cache));
+        const selected = pickRandomRestaurant();
+        if (!selected) {
+          setStatus("No fresh restaurant picks left. Try again in a bit.");
+          setProviderStatus("none");
+          return;
+        }
+
+        renderRestaurant(selected);
       } catch (error) {
         console.error(error);
         setStatus("Couldn’t fetch restaurants right now. The map servers are being dramatic; try again in a minute.");
@@ -351,3 +423,5 @@ out center 80;
   </script>
 </body>
 </html>
+
+

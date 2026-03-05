@@ -15,7 +15,7 @@ export async function onRequestGet({ request, env }) {
   const lat = Number(requestUrl.searchParams.get("lat"));
   const lon = Number(requestUrl.searchParams.get("lon"));
   const rawRadius = Number(requestUrl.searchParams.get("radius") || 3000);
-  const radius = Math.max(300, Math.min(rawRadius, 5000));
+  const radius = Math.max(300, Math.min(rawRadius, 15000));
 
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
     return json({ error: "Invalid lat/lon" }, 400);
@@ -64,3 +64,4 @@ function json(body, status) {
     }
   });
 }
+
